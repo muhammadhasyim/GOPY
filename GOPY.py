@@ -2545,18 +2545,41 @@ def get_oxygen_sites(atom_list):
             oxygen_sites.append(atom)
     return oxygen_sites
 
+def get_carbon_sites(atom_list):
+    """Find all carbon atoms from graphene as potential metal binding sites.
+    
+    Used when no functional groups are present (pristine graphene).
+    
+    Returns:
+        list: List of carbon Atom objects suitable for metal adsorption
+    """
+    carbon_sites = []
+    for atom in atom_list:
+        atom_name = str(atom.atom_name).strip().upper()
+        residue = str(atom.residue_name).strip().upper()
+        # GOPY format: CX = pristine graphene carbon
+        if atom_name in ['CX', 'C'] and residue == 'GGG':
+            carbon_sites.append(atom)
+    return carbon_sites
+
 def add_metal_ion(init_file, metal_symbol, num_ions, placement_mode, filename1):
-    """Add heavy metal ions to a functionalized graphene structure.
+    """Add heavy metal ions to a graphene structure (pristine or functionalized).
     
     Args:
-        init_file (str): Path to input PDB file (GO with functional groups)
+        init_file (str): Path to input PDB file (pristine graphene or GO with functional groups)
         metal_symbol (str): Chemical symbol of metal (e.g., 'Zn', 'Cu', 'Pb')
         num_ions (int): Number of metal ions to place
-        placement_mode (str): 'random' for random oxygen sites, 'all' for one per O site
+        placement_mode (str): 'random' for random sites, 'all' for sequential sites
         filename1 (str): Output filename
     
     Returns:
         str: Status message
+    
+    Notes:
+        - If functional groups (OH, COOH) are present, metal ions are placed above oxygen atoms
+        - If no functional groups, metal ions are placed above carbon atoms (pristine graphene)
+        - Metal-O distance is used for functionalized graphene
+        - Metal-C distance (M-O + 0.5 Å) is used for pristine graphene
     """
     if metal_symbol not in METAL_IONS:
         print(f"Error: Metal '{metal_symbol}' not supported.")
@@ -2567,44 +2590,54 @@ def add_metal_ion(init_file, metal_symbol, num_ions, placement_mode, filename1):
     M_O_dist = metal_info['M_O_distance']
     residue_name = metal_info['residue']
     
-    # Read in the GO structure
+    # Read in the structure (works for both pristine and GO)
     atoms = read_in_GO(init_file)
     
-    # Find oxygen binding sites
-    oxygen_sites = get_oxygen_sites(atoms)
+    # First try to find oxygen binding sites (from functional groups)
+    binding_sites = get_oxygen_sites(atoms)
+    binding_type = "oxygen"
+    binding_distance = M_O_dist
     
-    if len(oxygen_sites) == 0:
-        print("Error: No oxygen atoms found (OH or COOH groups required).")
-        print("Please use a functionalized graphene file (from generate_GO).")
-        return "error"
+    # If no oxygen sites, fall back to carbon sites (pristine graphene)
+    if len(binding_sites) == 0:
+        binding_sites = get_carbon_sites(atoms)
+        binding_type = "carbon"
+        # Metal-carbon distance is typically larger than metal-oxygen
+        binding_distance = M_O_dist + 0.5  # Add 0.5 Å for M-C vs M-O
+        
+        if len(binding_sites) == 0:
+            print("Error: No binding sites found (no carbon or oxygen atoms).")
+            return "error"
+        
+        print(f"No functional groups found - using pristine graphene carbon sites")
     
-    print(f"Found {len(oxygen_sites)} potential oxygen binding sites")
-    print(f"Placing {metal_symbol}({metal_info['charge']}+) ions at {M_O_dist} Å above oxygen atoms")
+    print(f"Found {len(binding_sites)} potential {binding_type} binding sites")
+    print(f"Placing {metal_symbol}({metal_info['charge']}+) ions at {binding_distance:.2f} Å above {binding_type} atoms")
     
     # Get the next atom number
     max_atom_num = max([atom.atom_number for atom in atoms])
     max_res_num = max([int(atom.residue_number) if isinstance(atom.residue_number, (int, str)) and str(atom.residue_number).isdigit() else 0 for atom in atoms])
     
-    # Determine which oxygen sites to use
+    # Determine which sites to use
     if placement_mode == 'all':
-        selected_sites = oxygen_sites[:num_ions] if num_ions < len(oxygen_sites) else oxygen_sites
+        selected_sites = binding_sites[:num_ions] if num_ions < len(binding_sites) else binding_sites
     else:  # random
-        if num_ions > len(oxygen_sites):
-            print(f"Warning: Requested {num_ions} ions but only {len(oxygen_sites)} O sites available.")
-            num_ions = len(oxygen_sites)
-        selected_sites = random.sample(oxygen_sites, num_ions)
+        if num_ions > len(binding_sites):
+            print(f"Warning: Requested {num_ions} ions but only {len(binding_sites)} sites available.")
+            num_ions = len(binding_sites)
+        selected_sites = random.sample(binding_sites, num_ions)
     
     # Track which sites have been used to avoid placing metals too close together
     used_positions = []
     min_metal_distance = 3.0  # Minimum distance between metal ions in Å
     
     ions_placed = 0
-    for i, oxygen in enumerate(selected_sites):
-        # Calculate metal position (directly above oxygen atom)
-        # Metal is placed at M_O_dist above the oxygen (in +z direction since OH is on top)
-        metal_x = oxygen.x
-        metal_y = oxygen.y
-        metal_z = oxygen.z + M_O_dist
+    for i, site in enumerate(selected_sites):
+        # Calculate metal position (directly above the binding site)
+        # Metal is placed at binding_distance above the site (in +z direction)
+        metal_x = site.x
+        metal_y = site.y
+        metal_z = site.z + binding_distance
         
         # Check if this position is too close to an already placed metal
         too_close = False
