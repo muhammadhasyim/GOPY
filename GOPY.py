@@ -170,7 +170,8 @@ def generate_pristine_graphene(x_dim, y_dim, filename1):
 
 def writepdb3(list_of_coords, name):
     """
-    This is the function used to write a PDB file using the list of coordinates from generate_pristine_graphene. 
+    This is the function used to write a PDB file using the list of coordinates from generate_pristine_graphene.
+    Outputs standard PDB format compatible with Avogadro, VMD, etc.
     """
     list_of_coords2 = []
     for elem in range(len(list_of_coords)):
@@ -181,12 +182,24 @@ def writepdb3(list_of_coords, name):
         string = str(name) + ".pdb"
     else:
         string = str(name)
-    with open(string, 'a') as le_file:
-        for element in range(len(list_of_coords)):
-            temp_atom = Atom(element, "CX", "GGG", element, list_of_coords[element][0], list_of_coords[element][1], list_of_coords[element][2])
-            line = "ATOM" + lw2(7, str(temp_atom.atom_number)) + str(temp_atom.atom_number) + lw(4, str(temp_atom.atom_name)) + str(temp_atom.atom_name) + "  " + str(temp_atom.residue_name) + lw(6, str(temp_atom.residue_number)) + str(temp_atom.residue_number) + lw(12, str(temp_atom.x)) + str(temp_atom.x) + lw(8, str(temp_atom.y)) + str(temp_atom.y) + lw(8, str(temp_atom.z)) + str(temp_atom.z) + "  1.00  0.00             "
-            del temp_atom
+    with open(string, 'w') as le_file:  # Changed 'a' to 'w' to overwrite
+        for idx in range(len(list_of_coords)):
+            x = float(list_of_coords[idx][0])
+            y = float(list_of_coords[idx][1])
+            z = float(list_of_coords[idx][2])
+            # Standard PDB format
+            line = "{:<6s}{:5d} {:<4s} {:3s} {:1s}{:4d}    {:8.3f}{:8.3f}{:8.3f}{:6.2f}{:6.2f}           C".format(
+                "ATOM",
+                idx + 1,
+                "C",
+                "GGG",
+                "A",
+                idx + 1,
+                x, y, z,
+                1.00, 0.00
+            )
             le_file.write(line + '\n')
+        le_file.write("END\n")
     return list_of_coords
 
 def lw2(max_no, str_obj):
@@ -244,25 +257,101 @@ def pristine_coords_to_objects(list_of_coords):
         list_of_objects.append(Atom(element, "CX", "GGG", element, list_of_coords[element][0], list_of_coords[element][1], list_of_coords[element][2]))
     return list_of_objects
 
+def parse_pdb_line(line):
+    """Parse a PDB ATOM line using fixed-width columns.
+    
+    Returns dict with: serial, name, resName, chainID, resSeq, x, y, z
+    """
+    if not line.startswith('ATOM') and not line.startswith('HETATM'):
+        return None
+    try:
+        return {
+            'serial': int(line[6:11].strip()),
+            'name': line[12:16].strip(),
+            'resName': line[17:20].strip(),
+            'chainID': line[21:22].strip(),
+            'resSeq': int(line[22:26].strip()) if line[22:26].strip().isdigit() else 1,
+            'x': float(line[30:38].strip()),
+            'y': float(line[38:46].strip()),
+            'z': float(line[46:54].strip()),
+        }
+    except (ValueError, IndexError):
+        # Fallback to whitespace-split parsing for older format
+        parts = line.split()
+        if len(parts) >= 8:
+            return {
+                'serial': int(parts[1]),
+                'name': parts[2],
+                'resName': parts[3],
+                'chainID': 'A',
+                'resSeq': int(parts[4]) if parts[4].isdigit() else 1,
+                'x': float(parts[5]),
+                'y': float(parts[6]),
+                'z': float(parts[7]),
+            }
+        return None
+
 def read_in_graphene(pdbfile):
-    """Reads in a PG layer where C atom name is 'CX', residue name is 'GGG'"""
+    """Reads in a PG layer where C atom name is 'CX' or 'C', residue name is 'GGG'.
+    Internally converts 'C' atoms back to 'CX' for code compatibility."""
+    atoms = []
     with open(pdbfile, "r") as f:
-        filedata = f.read()
-        filedata = filedata.replace("C   GRA X", "CX  GGG  ")
-        content = filedata.splitlines()
-        atom_lines = [x.split() for x in content if (('ATOM' in str(x)) and ('GGG' in str(x)) and ('CX' in str(x)))]
-        atoms = [Atom(int(str(atom_lines[x][1])), str(atom_lines[x][2]), str(atom_lines[x][3]), int(str(atom_lines[x][1])), float(str(atom_lines[x][5])), float(str(atom_lines[x][6])), float(str(atom_lines[x][7]))) for x in range(len(atom_lines))] 
+        for line in f:
+            if 'GGG' not in line:
+                continue
+            parsed = parse_pdb_line(line)
+            if parsed is None:
+                continue
+            atom_name = parsed['name']
+            # Convert 'C' to 'CX' for internal compatibility
+            if atom_name == 'C':
+                atom_name = 'CX'
+            atoms.append(Atom(
+                parsed['serial'],
+                atom_name,
+                parsed['resName'],
+                parsed['serial'],
+                parsed['x'],
+                parsed['y'],
+                parsed['z']
+            ))
     return atoms
 
 def read_in_GO(pdbfile):
-    """Reads in a GO layer where C atom name is "CX", residue name is 'GGG'
-    Expected carboyl residue name: C1A; Expected epoxy residue name: E1A; Expected hydroxyl residue name: H1A;"""
+    """Reads in a GO layer. Supports both GOPY format (CX, CY, OL, etc.) and 
+    standard element format (C, O, H). Internally uses GOPY atom names.
+    Expected residue names: GGG (graphene), C1A (carboxyl), E1A (epoxy), H1A (hydroxyl).
+    Also reads metal ion residues (ZN, CU, PB, etc.)."""
+    valid_residues = ['GGG', 'C1A', 'E1A', 'H1A', 'P1A', 'N1A', 'N2A', 'N3A',
+                      'ZN', 'CU', 'PB', 'CD', 'HG', 'FE', 'NI', 'CO', 'MN', 
+                      'CR', 'AG', 'AU', 'CA', 'MG', 'AL', 'SR', 'BA', 'U']
+    atoms = []
     with open(pdbfile, "r") as f:
-        filedata = f.read()
-        filedata = filedata.replace("C   GRA X", "CX  GGG  ")
-        content = filedata.splitlines()
-        atom_lines = [x.split() for x in content if (('ATOM' in str(x)) and (('C1A' in str(x)) or ('E1A' in str(x)) or ('H1A' in str(x)) or ('GGG' in str(x))))]
-        atoms = [Atom(int(str(atom_lines[x][1])), str(atom_lines[x][2]), str(atom_lines[x][3]), int(str(atom_lines[x][4])), float(str(atom_lines[x][5])), float(str(atom_lines[x][6])), float(str(atom_lines[x][7]))) for x in range(len(atom_lines))] 
+        for line in f:
+            # Skip non-ATOM lines
+            if not line.startswith('ATOM') and not line.startswith('HETATM'):
+                continue
+            # Check if line contains valid residue
+            has_valid_res = any(res in line for res in valid_residues)
+            if not has_valid_res:
+                continue
+            parsed = parse_pdb_line(line)
+            if parsed is None:
+                continue
+            atom_name = parsed['name']
+            residue_name = parsed['resName']
+            # Convert standard elements back to GOPY format for GGG residue
+            if residue_name == 'GGG' and atom_name == 'C':
+                atom_name = 'CX'
+            atoms.append(Atom(
+                parsed['serial'],
+                atom_name,
+                residue_name,
+                parsed['resSeq'],
+                parsed['x'],
+                parsed['y'],
+                parsed['z']
+            ))
     return atoms
  
 def calculate_3D_distance_2_atoms(atom1, atom2):
@@ -330,12 +419,15 @@ def identify_bonds(chosen_atom, atom_list):
         return []
 
 def top_or_down():
-    """Random top or below draw."""
-    ct = random.randint(1,2)
-    if (ct == 1):
-        return 1
-    else:
-        return -1
+    """Random top or below draw. Set to 1 for top only, -1 for bottom only, or use random for both sides."""
+    # Return 1 for top only, -1 for bottom only
+    # Uncomment the random logic below for both sides:
+    # ct = random.randint(1,2)
+    # if (ct == 1):
+    #     return 1
+    # else:
+    #     return -1
+    return 1  # TOP ONLY
     
 def get_map_anywhere(atom_list):
     """Creates a list of all available atoms which are not connected to functional groups."""
@@ -1785,13 +1877,76 @@ def lw(max_no, str_obj):
         string = string + ' '
     return string
 
+def get_element_symbol(atom_name):
+    """Convert GOPY atom names to standard element symbols.
+    
+    Mapping:
+        CX, CY, CZ, C4, C1-C6 → C  (Carbon)
+        OL, OJ, OK, OE, O1, O2 → O  (Oxygen)
+        HK, H1-H15 → H  (Hydrogen)
+        N1, N2, N3 → N  (Nitrogen)
+        Metal symbols (Zn, Cu, Pb, etc.) → kept as-is
+    
+    Returns:
+        str: Two-character element symbol (e.g., 'C ', 'O ', 'H ', 'ZN')
+    """
+    atom_name = str(atom_name).strip().upper()
+    
+    # Carbon atoms
+    if atom_name in ['CX', 'CY', 'CZ', 'C4', 'C1', 'C2', 'C3', 'C5', 'C6']:
+        return 'C '
+    
+    # Oxygen atoms
+    if atom_name in ['OL', 'OJ', 'OK', 'OE', 'O1', 'O2']:
+        return 'O '
+    
+    # Hydrogen atoms
+    if atom_name.startswith('H') and len(atom_name) <= 3:
+        return 'H '
+    
+    # Nitrogen atoms
+    if atom_name in ['N1', 'N2', 'N3', 'N1A', 'N2A', 'N3A']:
+        return 'N '
+    
+    # Metal ions - return as-is but ensure 2 characters
+    if len(atom_name) == 1:
+        return atom_name + ' '
+    elif len(atom_name) >= 2:
+        return atom_name[:2]
+    
+    # Default: take first character
+    return atom_name[0] + ' '
+
 def writepdb(list_of_atoms, filename1):
-    """PDB writer"""
+    """PDB writer - outputs standard PDB format compatible with Avogadro, VMD, etc.
+    
+    Uses proper PDB column formatting with element symbol at columns 77-78.
+    """
     os.chdir(os.getcwd())
-    with open(str(filename1), 'a') as le_file:
+    with open(str(filename1), 'w') as le_file:  # Changed 'a' to 'w' to overwrite
         for atom in list_of_atoms:
-            line = "ATOM" + lw(7, str(atom.atom_number)) + str(atom.atom_number) + lw(4, str(atom.atom_name)) + str(atom.atom_name) + "  " + str(atom.residue_name) + lw(6, str(atom.residue_number)) + str(atom.residue_number) + lw(12, str(atom.x)) + str(atom.x) + lw(8, str(atom.y)) + str(atom.y) + lw(8, str(atom.z)) + str(atom.z) + "  1.00  0.00             "
+            element = get_element_symbol(atom.atom_name).strip()
+            # Format coordinates with proper precision
+            x = float(atom.x)
+            y = float(atom.y)
+            z = float(atom.z)
+            res_num = int(atom.residue_number) if str(atom.residue_number).isdigit() else 1
+            # Standard PDB format (columns are critical):
+            # 1-6: ATOM, 7-11: serial, 13-16: name, 18-20: resName, 22: chain, 23-26: resSeq
+            # 31-38: x, 39-46: y, 47-54: z, 55-60: occupancy, 61-66: tempFactor, 77-78: element
+            line = "{:<6s}{:5d} {:<4s} {:3s} {:1s}{:4d}    {:8.3f}{:8.3f}{:8.3f}{:6.2f}{:6.2f}          {:>2s}".format(
+                "ATOM",
+                int(atom.atom_number),
+                element,
+                str(atom.residue_name)[:3],
+                "A",
+                res_num,
+                x, y, z,
+                1.00, 0.00,
+                element
+            )
             le_file.write(line + '\n')
+        le_file.write("END\n")
 
 def find_rings(atom_list):
     """Returns a list of (x1, x2, x3, x4, x5, x6) representing atoms making up a graphene ring."""    
@@ -2343,6 +2498,160 @@ def hole_generation(init_file, number_of_holes, atom_range, uorm, iore, cleanup,
     print('done.')
     return "done."
 
+### HEAVY METAL ION PLACEMENT ###
+
+# Dictionary of supported metal ions with their properties
+# Format: 'symbol': {'name': full_name, 'charge': formal_charge, 'M_O_distance': typical M-O distance in Å}
+METAL_IONS = {
+    'Zn': {'name': 'Zinc', 'charge': 2, 'M_O_distance': 2.10, 'residue': 'ZN'},
+    'Cu': {'name': 'Copper', 'charge': 2, 'M_O_distance': 1.95, 'residue': 'CU'},
+    'Pb': {'name': 'Lead', 'charge': 2, 'M_O_distance': 2.50, 'residue': 'PB'},
+    'Cd': {'name': 'Cadmium', 'charge': 2, 'M_O_distance': 2.30, 'residue': 'CD'},
+    'Hg': {'name': 'Mercury', 'charge': 2, 'M_O_distance': 2.40, 'residue': 'HG'},
+    'Ni': {'name': 'Nickel', 'charge': 2, 'M_O_distance': 2.05, 'residue': 'NI'},
+    'Co': {'name': 'Cobalt', 'charge': 2, 'M_O_distance': 2.10, 'residue': 'CO'},
+    'Fe': {'name': 'Iron', 'charge': 2, 'M_O_distance': 2.15, 'residue': 'FE'},
+    'Fe3': {'name': 'Iron(III)', 'charge': 3, 'M_O_distance': 2.00, 'residue': 'FE'},
+    'Mn': {'name': 'Manganese', 'charge': 2, 'M_O_distance': 2.20, 'residue': 'MN'},
+    'Cr': {'name': 'Chromium', 'charge': 3, 'M_O_distance': 2.00, 'residue': 'CR'},
+    'As': {'name': 'Arsenic', 'charge': 3, 'M_O_distance': 1.80, 'residue': 'AS'},
+    'Ag': {'name': 'Silver', 'charge': 1, 'M_O_distance': 2.30, 'residue': 'AG'},
+    'Au': {'name': 'Gold', 'charge': 1, 'M_O_distance': 2.10, 'residue': 'AU'},
+    'Ca': {'name': 'Calcium', 'charge': 2, 'M_O_distance': 2.40, 'residue': 'CA'},
+    'Mg': {'name': 'Magnesium', 'charge': 2, 'M_O_distance': 2.10, 'residue': 'MG'},
+    'Al': {'name': 'Aluminum', 'charge': 3, 'M_O_distance': 1.90, 'residue': 'AL'},
+    'Sr': {'name': 'Strontium', 'charge': 2, 'M_O_distance': 2.60, 'residue': 'SR'},
+    'Ba': {'name': 'Barium', 'charge': 2, 'M_O_distance': 2.80, 'residue': 'BA'},
+    'U': {'name': 'Uranium', 'charge': 6, 'M_O_distance': 2.40, 'residue': 'U'},
+}
+
+def get_oxygen_sites(atom_list):
+    """Find all oxygen atoms from functional groups (OH and COOH) as potential metal binding sites.
+    
+    Supports both GOPY internal format (OL, OJ, OK) and standard element format (O).
+    
+    Returns:
+        list: List of oxygen Atom objects suitable for metal coordination
+    """
+    oxygen_sites = []
+    for atom in atom_list:
+        atom_name = str(atom.atom_name).strip().upper()
+        residue = str(atom.residue_name).strip().upper()
+        # GOPY format: OL = hydroxyl oxygen, OJ = carboxyl C=O, OK = carboxyl C-O-H
+        if atom_name in ['OL', 'OJ', 'OK']:
+            oxygen_sites.append(atom)
+        # Standard format: O atoms in H1A (hydroxyl) or C1A (carboxyl) residues
+        elif atom_name == 'O' and residue in ['H1A', 'C1A']:
+            oxygen_sites.append(atom)
+    return oxygen_sites
+
+def add_metal_ion(init_file, metal_symbol, num_ions, placement_mode, filename1):
+    """Add heavy metal ions to a functionalized graphene structure.
+    
+    Args:
+        init_file (str): Path to input PDB file (GO with functional groups)
+        metal_symbol (str): Chemical symbol of metal (e.g., 'Zn', 'Cu', 'Pb')
+        num_ions (int): Number of metal ions to place
+        placement_mode (str): 'random' for random oxygen sites, 'all' for one per O site
+        filename1 (str): Output filename
+    
+    Returns:
+        str: Status message
+    """
+    if metal_symbol not in METAL_IONS:
+        print(f"Error: Metal '{metal_symbol}' not supported.")
+        print(f"Supported metals: {', '.join(METAL_IONS.keys())}")
+        return "error"
+    
+    metal_info = METAL_IONS[metal_symbol]
+    M_O_dist = metal_info['M_O_distance']
+    residue_name = metal_info['residue']
+    
+    # Read in the GO structure
+    atoms = read_in_GO(init_file)
+    
+    # Find oxygen binding sites
+    oxygen_sites = get_oxygen_sites(atoms)
+    
+    if len(oxygen_sites) == 0:
+        print("Error: No oxygen atoms found (OH or COOH groups required).")
+        print("Please use a functionalized graphene file (from generate_GO).")
+        return "error"
+    
+    print(f"Found {len(oxygen_sites)} potential oxygen binding sites")
+    print(f"Placing {metal_symbol}({metal_info['charge']}+) ions at {M_O_dist} Å above oxygen atoms")
+    
+    # Get the next atom number
+    max_atom_num = max([atom.atom_number for atom in atoms])
+    max_res_num = max([int(atom.residue_number) if isinstance(atom.residue_number, (int, str)) and str(atom.residue_number).isdigit() else 0 for atom in atoms])
+    
+    # Determine which oxygen sites to use
+    if placement_mode == 'all':
+        selected_sites = oxygen_sites[:num_ions] if num_ions < len(oxygen_sites) else oxygen_sites
+    else:  # random
+        if num_ions > len(oxygen_sites):
+            print(f"Warning: Requested {num_ions} ions but only {len(oxygen_sites)} O sites available.")
+            num_ions = len(oxygen_sites)
+        selected_sites = random.sample(oxygen_sites, num_ions)
+    
+    # Track which sites have been used to avoid placing metals too close together
+    used_positions = []
+    min_metal_distance = 3.0  # Minimum distance between metal ions in Å
+    
+    ions_placed = 0
+    for i, oxygen in enumerate(selected_sites):
+        # Calculate metal position (directly above oxygen atom)
+        # Metal is placed at M_O_dist above the oxygen (in +z direction since OH is on top)
+        metal_x = oxygen.x
+        metal_y = oxygen.y
+        metal_z = oxygen.z + M_O_dist
+        
+        # Check if this position is too close to an already placed metal
+        too_close = False
+        for pos in used_positions:
+            dist = math.sqrt((metal_x - pos[0])**2 + (metal_y - pos[1])**2 + (metal_z - pos[2])**2)
+            if dist < min_metal_distance:
+                too_close = True
+                break
+        
+        if too_close:
+            print(f"  Skipping site {i+1}: too close to another metal ion")
+            continue
+        
+        # Create the metal ion atom
+        metal_atom = Atom(
+            max_atom_num + ions_placed + 1,
+            metal_symbol.upper()[:2],  # Atom name (max 2 chars)
+            residue_name,               # Residue name
+            str(max_res_num + ions_placed + 1),
+            float("{0:.3f}".format(metal_x)),
+            float("{0:.3f}".format(metal_y)),
+            float("{0:.3f}".format(metal_z))
+        )
+        
+        atoms.append(metal_atom)
+        used_positions.append((metal_x, metal_y, metal_z))
+        ions_placed += 1
+        print(f"  Placed {metal_symbol}({metal_info['charge']}+) at ({metal_x:.3f}, {metal_y:.3f}, {metal_z:.3f})")
+    
+    # Write output
+    writepdb(atoms, filename1)
+    print(f"\nSuccessfully placed {ions_placed} {metal_info['name']}({metal_info['charge']}+) ions")
+    print(f"Output saved to: {filename1}")
+    print(f"Total atoms: {len(atoms)}")
+    
+    return "done"
+
+def list_supported_metals():
+    """Print a table of all supported metal ions."""
+    print("\nSupported Heavy Metal Ions:")
+    print("-" * 60)
+    print(f"{'Symbol':<8} {'Name':<12} {'Charge':<8} {'M-O Distance (Å)':<18}")
+    print("-" * 60)
+    for symbol, info in METAL_IONS.items():
+        print(f"{symbol:<8} {info['name']:<12} {info['charge']}+{'':<6} {info['M_O_distance']:<18.2f}")
+    print("-" * 60)
+
 if (len(sys.argv) > 1):
     if (sys.argv[1] == "generate_PG"):
         try:
@@ -2371,6 +2680,18 @@ if (len(sys.argv) > 1):
             generate_N_doping(str(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5]), str(sys.argv[6]))
         except:
             print("Please type 'python GOPY.py help'")
+    elif (sys.argv[1] == "add_metal"):
+        try:
+            if len(sys.argv) >= 6:
+                add_metal_ion(str(sys.argv[2]), str(sys.argv[3]), int(sys.argv[4]), str(sys.argv[5]), str(sys.argv[6]))
+            else:
+                print("Usage: python GOPY.py add_metal <GO_file.pdb> <metal_symbol> <num_ions> <random|all> <output.pdb>")
+                print("Example: python GOPY.py add_metal GO.pdb Zn 3 random GO_Zn.pdb")
+        except Exception as e:
+            print(f"Error: {e}")
+            print("Please type 'python GOPY.py help'")
+    elif (sys.argv[1] == "list_metals"):
+        list_supported_metals()
     elif (sys.argv[1] == "help"):
         print("""Help is here. You can use GOPY in the following manner to generate graphene-based 2D PDB models:
 'python GOPY.py generate_PG X Y file_to_save'                                  - Used to generate a pristine graphene layer. The X and Y dimensions are required in Å. The file_to_save
@@ -2401,7 +2722,16 @@ if (len(sys.argv) > 1):
 'python GOPY.py generate_N_doped path_to_file 10 9 8 file_to_save'              - Used to generate an N-doped graphene layer. X Y and Z represent the number of N-graphitic,
                                                                                N-pyridinic and N-pyrrolic atoms respectively.
                                                                                E.g. 'python GOPY.py /path/to/PG.pdb 10 10 10 Ndoped.pdb' generates an N-doped molecule of the 
-                                                                               PG layer given as input with 10 N-graphitic atoms, 9 N-pyridinic atoms and 8 N-pyrrolic atoms.            
+                                                                               PG layer given as input with 10 N-graphitic atoms, 9 N-pyridinic atoms and 8 N-pyrrolic atoms.
+
+'python GOPY.py add_metal path_to_GO M N mode file_to_save'                    - Used to add heavy metal ions to a functionalized graphene (GO) structure.
+                                                                               M is the metal symbol (Zn, Cu, Pb, Cd, Hg, Fe, etc.).
+                                                                               N is the number of metal ions to place.
+                                                                               mode is either 'random' (random oxygen sites) or 'all' (sequential sites).
+                                                                               E.g. 'python GOPY.py add_metal GO.pdb Zn 3 random GO_Zn.pdb' places 3 Zn(II) ions
+                                                                               at random OH/COOH oxygen sites.
+
+'python GOPY.py list_metals'                                                   - Lists all supported metal ions with their properties (charge, M-O distance).
             """)
     else:
         print(sys.argv[1], " is not recognized. Please type 'python GOPY.py help' for instructions.")
